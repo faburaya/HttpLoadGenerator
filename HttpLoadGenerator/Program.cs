@@ -71,11 +71,26 @@ internal class Program
         return await loop.TestApi();
     }
 
+    private static List<Task<AccumulatedStats>> DropFinishedLoopsAndCollectStats(
+        List<Task<AccumulatedStats>> requestLoops, ref AccumulatedStats finalStats)
+    {
+        List<Task<AccumulatedStats>> runningLoops = new();
+        foreach (Task<AccumulatedStats> loop in requestLoops)
+        {
+            if (loop.IsCompleted)
+            {
+                finalStats += loop.Result;
+            }
+            else
+            {
+                runningLoops.Add(loop);
+            }
+        }
+        return runningLoops;
+    }
+
     static void Main(string[] args)
     {
-        bool keepRunning = true;
-        Console.CancelKeyPress += delegate { keepRunning = false; };
-
         double? targetRps = GetTargetRpsFromCommandLine(args);
         if (targetRps == null)
             return;
@@ -83,49 +98,42 @@ internal class Program
         using RequestRateController requestRateController = new(targetRps.Value);
         using ServiceProvider serviceProvider = CreateServiceProvider(requestRateController);
 
+        Console.WriteLine("Sending requests... (CTRL+C to stop)");
+
         List<Task<AccumulatedStats>> requestLoops =
             new() { StartRequestLoop(serviceProvider) };
 
         double peakRps = 0.0;
         AccumulatedStats finalStats = new();
-        while (keepRunning)
+        while (InterruptSignalTrap.CanContinue())
         {
             double currentRps = requestRateController.WaitAndGetNextRps();
+            requestLoops = DropFinishedLoopsAndCollectStats(requestLoops, ref finalStats);
             peakRps = Math.Max(peakRps, currentRps);
-            Console.Write(
-                $"\rTarget rate of requests = {targetRps:F3} rps / Current rate = {currentRps} rps");
 
-            if (currentRps < targetRps * 0.95)
+            if (currentRps < targetRps * 0.95 || requestLoops.Count == 0)
             {
                 requestLoops.Add(StartRequestLoop(serviceProvider));
             }
 
-            List<Task<AccumulatedStats>> runningLoops = new();
-            foreach (Task<AccumulatedStats> loop in requestLoops)
+            if (InterruptSignalTrap.CanContinue())
             {
-                if (loop.IsCompleted)
-                {
-                    finalStats += loop.Result;
-                }
-                else
-                {
-                    runningLoops.Add(loop);
-                }
+                Console.WriteLine(
+                    $"Running {requestLoops.Count} request loops - Target rate = {targetRps:F3} rps / Current rate = {currentRps:F3} rps");
             }
-            requestLoops = runningLoops;
         }
 
-        Console.WriteLine('\r');
-        ReportStatistics(finalStats);
-        Console.WriteLine($"Peak rate was {peakRps} rps");
+        ReportStatistics(finalStats, peakRps);
     }
 
-    private static void ReportStatistics(AccumulatedStats stats)
+    private static void ReportStatistics(AccumulatedStats stats, double peakRps)
     {
+        Console.WriteLine();
         Console.WriteLine($"API test ran for {stats.TotalElapsedTime}");
-        Console.WriteLine($"A total of {stats.CountTotalRequests} have been sent");
-        Console.WriteLine($"{100.0 * stats.CountNotOkayHttpResponses / stats.CountTotalRequests} % of HTTP status not OK");
-        Console.WriteLine($"{100.0 * stats.CountNotSuccessfulResponses / stats.CountTotalRequests} % of unsuccessful responses");
-        Console.WriteLine($"Average rate was {stats.AverageRequestRatePerSec} rps");
+        Console.WriteLine($"Average rate = {stats.AverageRequestRatePerSec} rps");
+        Console.WriteLine($"Peak rate = {peakRps:F3} rps");
+        Console.WriteLine($"A total of {stats.CountTotalRequests} requests have been sent:");
+        Console.WriteLine($"% of HTTP status not OK = {100.0 * stats.CountNotOkayHttpResponses / stats.CountTotalRequests:F1}");
+        Console.WriteLine($"% of Unsuccessful responses = {100.0 * stats.CountNotSuccessfulResponses / stats.CountTotalRequests:F1}");
     }
 }

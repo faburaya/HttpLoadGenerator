@@ -52,4 +52,29 @@ public class RequestRateControllerTests
     {
         TestTakeAllTickets(rps);
     }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    public void TakeTicketThenStopDistribution(int ticketCount)
+    {
+        using RequestRateController requestRateController = new(ticketCount);
+
+        Assert.True(
+            requestRateController.TakeTicketToSendRequest(),
+            "At least one ticket must be available before stopping distribution!");
+
+        requestRateController.StopTicketDistribution();
+
+        Assert.False(
+            requestRateController.TakeTicketToSendRequest(),
+            "No ticket can be available after stopping distribution!");
+    }
 }

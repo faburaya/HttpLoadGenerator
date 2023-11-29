@@ -71,22 +71,26 @@ internal class Program
         return await loop.TestApi();
     }
 
-    private static List<Task<AccumulatedStats>> DropFinishedLoopsAndCollectStats(
-        List<Task<AccumulatedStats>> requestLoops, ref AccumulatedStats finalStats)
+    private static AccumulatedStats DropFinishedLoopsAndCollectStats(
+        ref List<Task<AccumulatedStats>> requestLoops)
     {
         List<Task<AccumulatedStats>> runningLoops = new();
+        AccumulatedStats stats = new();
+
         foreach (Task<AccumulatedStats> loop in requestLoops)
         {
             if (loop.IsCompleted)
             {
-                finalStats += loop.Result;
+                stats += loop.Result;
             }
             else
             {
                 runningLoops.Add(loop);
             }
         }
-        return runningLoops;
+
+        requestLoops = runningLoops;
+        return stats;
     }
 
     static void Main(string[] args)
@@ -98,42 +102,70 @@ internal class Program
         using RequestRateController requestRateController = new(targetRps.Value);
         using ServiceProvider serviceProvider = CreateServiceProvider(requestRateController);
 
-        Console.WriteLine("Sending requests... (CTRL+C to stop)");
+        DateTime startTime = DateTime.Now;
 
         List<Task<AccumulatedStats>> requestLoops =
             new() { StartRequestLoop(serviceProvider) };
 
-        double peakRps = 0.0;
+        Console.WriteLine("Sending requests... (CTRL+C to stop)");
+
+        InterruptSignalTrap.OnSignalInterception(() =>
+        {
+            requestRateController.StopTicketDistribution();
+            Console.WriteLine("\nProgram interruption signal captured: stopping...");
+        });
+
         AccumulatedStats finalStats = new();
+
         while (InterruptSignalTrap.CanContinue())
         {
-            double currentRps = requestRateController.WaitAndGetNextRps();
-            requestLoops = DropFinishedLoopsAndCollectStats(requestLoops, ref finalStats);
-            peakRps = Math.Max(peakRps, currentRps);
+            double evaluatedRps = requestRateController.WaitAndGetNextRps();
+            int loopCountAtEvaluation = requestLoops.Count;
+            finalStats += DropFinishedLoopsAndCollectStats(ref requestLoops);
 
-            if (currentRps < targetRps * 0.95 || requestLoops.Count == 0)
+            if (evaluatedRps < targetRps * 0.95 || requestLoops.Count == 0)
             {
-                requestLoops.Add(StartRequestLoop(serviceProvider));
+                int estimatedNecessaryLoops =
+                    (int)Math.Floor(0.8 * loopCountAtEvaluation * targetRps.Value / evaluatedRps);
+
+                int countExtraLoops = Math.Max(1, estimatedNecessaryLoops - requestLoops.Count);
+                for (int n = 0; n <  countExtraLoops; ++n)
+                {
+                    requestLoops.Add(StartRequestLoop(serviceProvider));
+                }
             }
 
             if (InterruptSignalTrap.CanContinue())
             {
                 Console.WriteLine(
-                    $"Running {requestLoops.Count} request loops - Target rate = {targetRps:F3} rps / Current rate = {currentRps:F3} rps");
+                    $"Running {loopCountAtEvaluation} request loops - Target rate = {targetRps:F3} rps / Current rate = {evaluatedRps:F3} rps");
             }
         }
 
-        ReportStatistics(finalStats, peakRps);
+        Task.WaitAll(requestLoops.ToArray());
+        TimeSpan elapsedTime = DateTime.Now - startTime;
+        finalStats += DropFinishedLoopsAndCollectStats(ref requestLoops);
+
+        ReportStatistics(finalStats, elapsedTime);
     }
 
-    private static void ReportStatistics(AccumulatedStats stats, double peakRps)
+    private static void ReportStatistics(
+        AccumulatedStats stats, TimeSpan elapsedTime)
     {
+        double averageRps = stats.CountTotalRequests / elapsedTime.TotalSeconds;
+
+        double percentageHttpNotOkay =
+            100.0 * stats.CountNotOkayHttpResponses / stats.CountTotalRequests;
+
+        double percentageNotSuccessful =
+            100.0 * stats.CountNotSuccessfulResponses / stats.CountTotalRequests;
+
         Console.WriteLine();
-        Console.WriteLine($"API test ran for {stats.TotalElapsedTime}");
-        Console.WriteLine($"Average rate = {stats.AverageRequestRatePerSec} rps");
-        Console.WriteLine($"Peak rate = {peakRps:F3} rps");
+        Console.WriteLine($"API test ran for {elapsedTime}");
+        Console.WriteLine($"Average rate = {averageRps:F3} rps");
         Console.WriteLine($"A total of {stats.CountTotalRequests} requests have been sent:");
-        Console.WriteLine($"% of HTTP status not OK = {100.0 * stats.CountNotOkayHttpResponses / stats.CountTotalRequests:F1}");
-        Console.WriteLine($"% of Unsuccessful responses = {100.0 * stats.CountNotSuccessfulResponses / stats.CountTotalRequests:F1}");
+        Console.WriteLine($"% of HTTP status not OK = {percentageHttpNotOkay:F1}");
+        Console.WriteLine($"% of Unsuccessful responses = {percentageNotSuccessful:F1}");
+        Console.WriteLine();
     }
 }

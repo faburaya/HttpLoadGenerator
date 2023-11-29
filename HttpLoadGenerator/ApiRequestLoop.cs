@@ -21,7 +21,6 @@ internal class ApiRequestLoop
 
     public async Task<AccumulatedStats> TestApi()
     {
-        DateTime start = DateTime.Now;
         AccumulatedStats stats = new();
         for (; _requestRateController.TakeTicketToSendRequest(); ++stats.CountTotalRequests)
         {
@@ -38,7 +37,6 @@ internal class ApiRequestLoop
                 ++stats.CountNotSuccessfulResponses;
             }
         }
-        stats.TotalElapsedTime = DateTime.Now - start;
         return stats;
     }
 }

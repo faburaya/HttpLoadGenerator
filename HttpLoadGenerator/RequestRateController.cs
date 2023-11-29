@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
-using System.Threading.Tasks;
+using System.Timers;
 
 using HttpLoadGenerator.Interfaces;
 
@@ -14,6 +14,10 @@ namespace HttpLoadGenerator;
 /// </summary>
 internal class RequestRateController : IDisposable, IRequestRateController
 {
+    /// <summary>
+    /// This is the smallest possible interval for ticket renewal,
+    /// and is supposed to be as big as the slowest request round trip.
+    /// </summary>
     private static readonly TimeSpan _minTimeQuantum = TimeSpan.FromMilliseconds(1200);
 
     private static void CalculateAvailableTickets(
@@ -44,9 +48,7 @@ internal class RequestRateController : IDisposable, IRequestRateController
 
     private readonly TimeSpan _ticketsRenewalInterval;
 
-    private readonly Timer _timer;
-
-    private readonly AutoResetEvent _ticketsRenewalEvent;
+    private readonly System.Timers.Timer _timer;
 
     private int _availableTicketsCount;
 
@@ -65,23 +67,26 @@ internal class RequestRateController : IDisposable, IRequestRateController
         _countOfTicketsLeftLastTime = _ticketsBudgetPerInterval;
         _evaluatedRps = 0.0;
 
-        _ticketsRenewalEvent = new AutoResetEvent(false);
-        _timer = new Timer(
-            RenewTickets, null, _ticketsRenewalInterval, _ticketsRenewalInterval);
+        _timer = new(_ticketsRenewalInterval.TotalMilliseconds);
+        _timer.Elapsed += RenewTickets;
+        _timer.AutoReset = true;
+        _timer.Start();
     }
 
-    private void RenewTickets(object? _)
+    private void RenewTickets(object? source, ElapsedEventArgs @event)
     {
         _countOfTicketsLeftLastTime =
             Math.Max(
                 Interlocked.Exchange(
                     ref _availableTicketsCount, _ticketsBudgetPerInterval), 0);
 
-        Interlocked.Exchange(ref _evaluatedRps,
-            (_ticketsBudgetPerInterval - _countOfTicketsLeftLastTime)
-                / _ticketsRenewalInterval.TotalSeconds);
+        lock(this)
+        {
+            _evaluatedRps = (_ticketsBudgetPerInterval - _countOfTicketsLeftLastTime)
+                / _ticketsRenewalInterval.TotalSeconds;
 
-        _ticketsRenewalEvent.Set();
+            Monitor.PulseAll(this);
+        }
     }
 
     private bool _disposed = false;
@@ -92,7 +97,6 @@ internal class RequestRateController : IDisposable, IRequestRateController
             return;
 
         _timer.Dispose();
-        _ticketsRenewalEvent.Dispose();
 
         _disposed = true;
         GC.SuppressFinalize(this);
@@ -105,7 +109,23 @@ internal class RequestRateController : IDisposable, IRequestRateController
 
     public double WaitAndGetNextRps()
     {
-        _ticketsRenewalEvent.WaitOne();
-        return Volatile.Read(ref _evaluatedRps);
+        lock (this)
+        {
+            if (_timer.Enabled)
+            {
+                Monitor.Wait(this);
+            }
+            return _evaluatedRps;
+        }
+    }
+
+    public void StopTicketDistribution()
+    {
+        lock (this)
+        {
+            _timer.Stop();
+            Interlocked.Exchange(ref _availableTicketsCount, 0);
+            Monitor.PulseAll(this);
+        }
     }
 }

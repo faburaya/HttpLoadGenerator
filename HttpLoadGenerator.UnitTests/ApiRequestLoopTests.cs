@@ -101,26 +101,10 @@ public class ApiRequestLoopTests
             CreateApiClientMock(countHttpOkay, countHttpNotOkay, countNotSuccessful);
 
         ApiRequestLoop requestLoop = new(apiClientMock.Object, rpsControllerMock.Object);
-
-        DateTime timeBeforeCall = DateTime.Now;
         AccumulatedStats stats = await requestLoop.TestApi();
-        TimeSpan expectedElapsedTime = DateTime.Now - timeBeforeCall;
 
         Assert.Equal(totalCountRequests, stats.CountTotalRequests);
         Assert.Equal(countHttpNotOkay, stats.CountNotOkayHttpResponses);
         Assert.Equal(countNotSuccessful, stats.CountNotSuccessfulResponses);
-
-        const double epsilon = 0.05;
-        const double minRatio = 1 - epsilon;
-        const double maxRatio = 1 + epsilon;
-
-        Assert.InRange(
-            stats.TotalElapsedTime.TotalSeconds / expectedElapsedTime.TotalSeconds,
-            minRatio, maxRatio);
-
-        double expectedRps = totalCountRequests / expectedElapsedTime.TotalSeconds;
-        Assert.InRange(
-            expectedRps / stats.AverageRequestRatePerSec,
-            minRatio, maxRatio);
     }
 }
